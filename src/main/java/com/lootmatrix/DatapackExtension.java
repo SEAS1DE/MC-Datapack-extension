@@ -1,10 +1,15 @@
 package com.lootmatrix;
 
+import com.lootmatrix.command.CalculateDistance;
+import com.lootmatrix.command.CommandRegister;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
 
 import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.chat.Component;
+import net.minecraft.server.permissions.Permission;
+import net.minecraft.server.permissions.Permissions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -25,13 +30,8 @@ public class DatapackExtension implements ModInitializer {
 		// However, some things (like resources) may still be uninitialized.
 		// Proceed with mild caution.
 
-        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
-            dispatcher.register(Commands.literal("test_command").executes(context -> {
-                context.getSource().sendSuccess(() -> Component.literal("Called /test_command."), false);
-                return 1;
-            }));
-        });
-
+        // 注册指令
+        CommandRegister.register();
 
         // LOGGER.info("Hello Fabric world!");
 	}
