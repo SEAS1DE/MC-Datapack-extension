@@ -4,7 +4,9 @@
 	"package": "com.lootmatrix.mixin",
 	"compatibilityLevel": "JAVA_21",
 	"mixins": [
-		"ExampleMixin"
+		"ExampleMixin",
+		"GlowPacketMixin",
+		"GlowEntityTrackerMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1
