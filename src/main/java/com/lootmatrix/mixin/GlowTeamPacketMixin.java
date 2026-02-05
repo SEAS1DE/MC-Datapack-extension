@@ -60,6 +60,11 @@ public abstract class GlowTeamPacketMixin {
             return;
         }
 
+        // 如果是内部发送的恢复包，不要拦截
+        if (GlowManager.isSendingInternalPacket()) {
+            return;
+        }
+
         String teamName = teamPacket.getName();
         Collection<String> players = teamPacket.getPlayers();
 

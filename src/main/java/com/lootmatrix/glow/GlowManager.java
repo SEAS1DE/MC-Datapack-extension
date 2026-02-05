@@ -43,6 +43,10 @@ public class GlowManager {
     // 反向缓存：实体名称 -> 实体ID，用于快速反向查找
     private static final Map<String, Integer> entityNameToIdCache = new ConcurrentHashMap<>();
 
+    // 线程局部变量：标记当前线程正在发送内部队伍恢复包
+    // 这样 Mixin 可以跳过这些包，避免恢复包被错误拦截
+    private static final ThreadLocal<Boolean> sendingInternalPacket = ThreadLocal.withInitial(() -> false);
+
     // Entity的共享flags数据访问器索引 (Glowing flag = 0x40, index 0)
     private static final int SHARED_FLAGS_INDEX = 0;
     private static final byte GLOWING_FLAG = 0x40;
@@ -234,6 +238,16 @@ public class GlowManager {
     }
 
     /**
+     * 检查当前线程是否正在发送内部队伍恢复包
+     * 用于 Mixin 跳过这些包的拦截
+     *
+     * @return 是否正在发送内部包
+     */
+    public static boolean isSendingInternalPacket() {
+        return sendingInternalPacket.get();
+    }
+
+    /**
      * 发送设置发光标志的数据包
      */
     private static void sendGlowingPacket(ServerPlayer viewer, Entity target, boolean glowing) {
@@ -369,34 +383,43 @@ public class GlowManager {
         // 获取服务器的真实记分板
         Scoreboard serverScoreboard = viewer.level().getServer().getScoreboard();
 
-        // 手动遍历所有队伍查找玩家所在的队伍
-        // 因为 getPlayerTeam() 似乎不能正确工作
-        PlayerTeam realTeam = null;
-        System.out.println("[GlowManager] Looking for team of: '" + entityName + "'");
-        for (PlayerTeam team : serverScoreboard.getPlayerTeams()) {
-            System.out.println("[GlowManager]   Checking team '" + team.getName() + "': " + team.getPlayers());
-            if (team.getPlayers().contains(entityName)) {
-                realTeam = team;
-                System.out.println("[GlowManager]   FOUND in team: " + team.getName());
-                break;
+        // 获取实体所在的真实队伍
+        // 对于玩家，直接使用 getPlayersTeam 方法
+        // 对于其他实体，使用 UUID 字符串
+        PlayerTeam realTeam = serverScoreboard.getPlayersTeam(entityName);
+
+        // 如果直接查找失败，尝试手动遍历（作为后备方案）
+        if (realTeam == null) {
+            for (PlayerTeam team : serverScoreboard.getPlayerTeams()) {
+                // 检查队伍成员，不区分大小写进行比较
+                for (String member : team.getPlayers()) {
+                    if (member.equalsIgnoreCase(entityName)) {
+                        realTeam = team;
+                        break;
+                    }
+                }
+                if (realTeam != null) break;
             }
         }
 
         if (realTeam != null) {
-            System.out.println("[GlowManager] Restoring " + entityName + " to team " + realTeam.getName());
-            // 实体在真实队伍中，发送将其加入真实队伍的包
-            // 先发送队伍信息包（确保客户端有这个队伍的定义）
-            ClientboundSetPlayerTeamPacket teamInfoPacket = ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(realTeam, false);
-            viewer.connection.send(teamInfoPacket);
+            // 设置标志，表示正在发送内部队伍恢复包
+            // 这样 Mixin 会跳过这些包的拦截
+            sendingInternalPacket.set(true);
+            try {
+                // 实体在真实队伍中，发送将其加入真实队伍的包
+                // 先发送队伍信息包（确保客户端有这个队伍的定义）
+                ClientboundSetPlayerTeamPacket teamInfoPacket = ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(realTeam, false);
+                viewer.connection.send(teamInfoPacket);
 
-            // 再发送将实体加入队伍的包
-            ClientboundSetPlayerTeamPacket addPacket = ClientboundSetPlayerTeamPacket.createPlayerPacket(
-                    realTeam, entityName, ClientboundSetPlayerTeamPacket.Action.ADD
-            );
-            viewer.connection.send(addPacket);
-            System.out.println("[GlowManager] Sent ADD packet for " + entityName + " to team " + realTeam.getName());
-        } else {
-            System.out.println("[GlowManager] No real team found for " + entityName);
+                // 再发送将实体加入队伍的包
+                ClientboundSetPlayerTeamPacket addPacket = ClientboundSetPlayerTeamPacket.createPlayerPacket(
+                        realTeam, entityName, ClientboundSetPlayerTeamPacket.Action.ADD
+                );
+                viewer.connection.send(addPacket);
+            } finally {
+                sendingInternalPacket.set(false);
+            }
         }
     }
 
