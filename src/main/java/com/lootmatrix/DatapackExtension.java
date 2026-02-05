@@ -2,6 +2,7 @@ package com.lootmatrix;
 
 import com.lootmatrix.command.CalculateDistance;
 import com.lootmatrix.command.CommandRegister;
+import com.lootmatrix.display.DisplayVisibilityEventHandler;
 import com.lootmatrix.glow.GlowEventHandler;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
 import net.fabricmc.api.ModInitializer;
@@ -36,6 +37,9 @@ public class DatapackExtension implements ModInitializer {
 
         // 注册发光效果事件处理器
         GlowEventHandler.register();
+
+        // 注册展示实体可见性事件处理器
+        DisplayVisibilityEventHandler.register();
 
         // LOGGER.info("Hello Fabric world!");
 	}

@@ -32,6 +32,17 @@ public class GlowManager {
     // 存储每个实体原始的发光状态，用于恢复
     private static final Map<Integer, Byte> originalFlags = new ConcurrentHashMap<>();
 
+    // 追踪每个玩家客户端上实体所在的队伍: 观察者UUID -> (目标实体ID -> 队伍颜色)
+    // 用于防止向客户端发送移除不存在的队伍成员的包
+    private static final Map<UUID, Map<Integer, GlowColor>> playerTeamStateMap = new ConcurrentHashMap<>();
+
+    // 缓存实体ID到队伍名称的映射，用于快速查找
+    // 实体ID -> 实体在队伍系统中的名称（玩家名或UUID字符串）
+    private static final Map<Integer, String> entityTeamCache = new ConcurrentHashMap<>();
+
+    // 反向缓存：实体名称 -> 实体ID，用于快速反向查找
+    private static final Map<String, Integer> entityNameToIdCache = new ConcurrentHashMap<>();
+
     // Entity的共享flags数据访问器索引 (Glowing flag = 0x40, index 0)
     private static final int SHARED_FLAGS_INDEX = 0;
     private static final byte GLOWING_FLAG = 0x40;
@@ -159,6 +170,70 @@ public class GlowManager {
     }
 
     /**
+     * 检查玩家是否对某个实体名称有发光效果
+     * 用于拦截队伍包时检查（供 Mixin 调用）
+     *
+     * @param viewer 观察者玩家
+     * @param entityName 实体在队伍系统中的名称（玩家名或UUID字符串）
+     * @return 是否有发光效果
+     */
+    public static boolean hasGlowForEntityName(ServerPlayer viewer, String entityName) {
+        UUID viewerId = viewer.getUUID();
+        Map<Integer, GlowColor> glowMap = playerGlowMap.get(viewerId);
+        if (glowMap == null || glowMap.isEmpty()) {
+            return false;
+        }
+
+        // 检查entityName是否对应任何有发光效果的实体
+        // entityName可能是玩家名或实体UUID
+        net.minecraft.server.level.ServerLevel level = viewer.level();
+
+        for (int entityId : glowMap.keySet()) {
+            Entity entity = level.getEntity(entityId);
+            if (entity != null) {
+                String name = getEntityTeamName(entity);
+                if (name.equals(entityName)) {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 检查是否有任何观察者对某个实体名称有发光效果
+     * 用于 Connection 级别的包拦截（供 Mixin 调用）
+     *
+     * @param entityName 实体在队伍系统中的名称（玩家名或UUID字符串）
+     * @return 是否有任何观察者对该实体有发光效果
+     */
+    public static boolean hasGlowForAnyViewer(String entityName) {
+        // 防止类初始化顺序问题导致的空指针
+        if (entityNameToIdCache == null || playerGlowMap == null) {
+            return false;
+        }
+
+        // 首先通过反向缓存快速查找实体ID
+        Integer entityId = entityNameToIdCache.get(entityName);
+
+        if (entityId == null) {
+            // 如果没有在缓存中找到，说明这个实体从未被添加过发光效果
+            return false;
+        }
+
+        // 检查是否有任何观察者对这个实体有发光效果
+        for (Map.Entry<UUID, Map<Integer, GlowColor>> entry : playerGlowMap.entrySet()) {
+            Map<Integer, GlowColor> glowMap = entry.getValue();
+            if (glowMap != null && glowMap.containsKey(entityId)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
      * 发送设置发光标志的数据包
      */
     private static void sendGlowingPacket(ServerPlayer viewer, Entity target, boolean glowing) {
@@ -199,22 +274,37 @@ public class GlowManager {
 
     /**
      * 发送队伍颜色数据包，让玩家看到正确的发光颜色
+     * 使用虚拟队伍，不依赖服务器的真实记分板
      */
     private static void sendTeamColorPacket(ServerPlayer viewer, Entity target, GlowColor color) {
+        UUID viewerId = viewer.getUUID();
+        int targetId = target.getId();
         String teamName = color.getTeamName();
         String entityName = getEntityTeamName(target);
 
-        // 确保队伍存在（发送创建或更新队伍的包）
-        Scoreboard scoreboard = viewer.level().getScoreboard();
-        PlayerTeam team = scoreboard.getPlayerTeam(teamName);
-
-        if (team == null) {
-            // 创建临时队伍对象用于发送数据包
-            team = new PlayerTeam(scoreboard, teamName);
-            team.setColor(color.getColor());
+        // 检查实体是否已经在同一个队伍中，如果是，不需要重新发送
+        Map<Integer, GlowColor> teamState = playerTeamStateMap.get(viewerId);
+        if (teamState != null) {
+            GlowColor oldColor = teamState.get(targetId);
+            if (oldColor == color) {
+                // 已经在同一个队伍中，不需要重新发送
+                return;
+            }
+            // 不需要发送REMOVE包，当实体加入新队伍时，客户端会自动处理
+            // 发送REMOVE包可能导致 "Player is either on another team or not on any team" 错误
         }
 
-        // 发送队伍创建/更新包
+        // 不发送从真实队伍移除的包，因为：
+        // 1. 客户端在收到ADD包时会自动将实体从旧队伍移到新队伍
+        // 2. 发送REMOVE包可能导致客户端状态不同步错误
+
+        // 创建一个临时的Scoreboard用于构建PlayerTeam对象
+        // 这个Scoreboard不会被添加到服务器，只用于构建数据包
+        Scoreboard tempScoreboard = new Scoreboard();
+        PlayerTeam team = new PlayerTeam(tempScoreboard, teamName);
+        team.setColor(color.getColor());
+
+        // 发送队伍创建/更新包（包含完整的队伍信息）
         ClientboundSetPlayerTeamPacket createPacket = ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(team, true);
         viewer.connection.send(createPacket);
 
@@ -223,27 +313,91 @@ public class GlowManager {
                 team, entityName, ClientboundSetPlayerTeamPacket.Action.ADD
         );
         viewer.connection.send(joinPacket);
+
+        // 记录队伍状态
+        playerTeamStateMap.computeIfAbsent(viewerId, k -> new ConcurrentHashMap<>())
+                .put(targetId, color);
+
+        // 缓存实体名称供包拦截使用
+        entityTeamCache.put(targetId, entityName);
+        entityNameToIdCache.put(entityName, targetId);
     }
 
     /**
-     * 发送将实体从队伍移除的数据包
+     * 发送将实体从虚拟发光队伍移除的数据包
+     * 这会让客户端清除实体的队伍颜色，并恢复到真实队伍状态
      */
     private static void sendTeamRemovePacket(ServerPlayer viewer, Entity target, GlowColor color) {
+        UUID viewerId = viewer.getUUID();
+        int targetId = target.getId();
         String teamName = color.getTeamName();
         String entityName = getEntityTeamName(target);
 
-        Scoreboard scoreboard = viewer.level().getScoreboard();
-        PlayerTeam team = scoreboard.getPlayerTeam(teamName);
-
-        if (team == null) {
-            team = new PlayerTeam(scoreboard, teamName);
+        // 清理内部追踪状态
+        Map<Integer, GlowColor> teamState = playerTeamStateMap.get(viewerId);
+        if (teamState != null) {
+            teamState.remove(targetId);
         }
 
-        // 发送将实体从队伍移除的包
-        ClientboundSetPlayerTeamPacket leavePacket = ClientboundSetPlayerTeamPacket.createPlayerPacket(
-                team, entityName, ClientboundSetPlayerTeamPacket.Action.REMOVE
+        // 从缓存中移除（只有当没有其他观察者对这个实体有发光效果时）
+        boolean hasOtherViewers = false;
+        for (Map.Entry<UUID, Map<Integer, GlowColor>> entry : playerGlowMap.entrySet()) {
+            if (!entry.getKey().equals(viewerId)) {
+                Map<Integer, GlowColor> otherGlowMap = entry.getValue();
+                if (otherGlowMap != null && otherGlowMap.containsKey(targetId)) {
+                    hasOtherViewers = true;
+                    break;
+                }
+            }
+        }
+        if (!hasOtherViewers) {
+            entityTeamCache.remove(targetId);
+            entityNameToIdCache.remove(entityName);
+        }
+
+        // 创建临时 Scoreboard 和 PlayerTeam 用于构建数据包
+        Scoreboard tempScoreboard = new Scoreboard();
+        PlayerTeam glowTeam = new PlayerTeam(tempScoreboard, teamName);
+
+        // 发送将实体从虚拟发光队伍移除的包
+        ClientboundSetPlayerTeamPacket removePacket = ClientboundSetPlayerTeamPacket.createPlayerPacket(
+                glowTeam, entityName, ClientboundSetPlayerTeamPacket.Action.REMOVE
         );
-        viewer.connection.send(leavePacket);
+        viewer.connection.send(removePacket);
+
+        // 恢复实体到真实队伍
+        // 获取服务器的真实记分板
+        Scoreboard serverScoreboard = viewer.level().getServer().getScoreboard();
+
+        // 手动遍历所有队伍查找玩家所在的队伍
+        // 因为 getPlayerTeam() 似乎不能正确工作
+        PlayerTeam realTeam = null;
+        System.out.println("[GlowManager] Looking for team of: '" + entityName + "'");
+        for (PlayerTeam team : serverScoreboard.getPlayerTeams()) {
+            System.out.println("[GlowManager]   Checking team '" + team.getName() + "': " + team.getPlayers());
+            if (team.getPlayers().contains(entityName)) {
+                realTeam = team;
+                System.out.println("[GlowManager]   FOUND in team: " + team.getName());
+                break;
+            }
+        }
+
+        if (realTeam != null) {
+            System.out.println("[GlowManager] Restoring " + entityName + " to team " + realTeam.getName());
+            // 实体在真实队伍中，发送将其加入真实队伍的包
+            // 先发送队伍信息包（确保客户端有这个队伍的定义）
+            ClientboundSetPlayerTeamPacket teamInfoPacket = ClientboundSetPlayerTeamPacket.createAddOrModifyPacket(realTeam, false);
+            viewer.connection.send(teamInfoPacket);
+
+            // 再发送将实体加入队伍的包
+            ClientboundSetPlayerTeamPacket addPacket = ClientboundSetPlayerTeamPacket.createPlayerPacket(
+                    realTeam, entityName, ClientboundSetPlayerTeamPacket.Action.ADD
+            );
+            viewer.connection.send(addPacket);
+            System.out.println("[GlowManager] Sent ADD packet for " + entityName + " to team " + realTeam.getName());
+        } else {
+            System.out.println("[GlowManager] No real team found for " + entityName);
+        }
     }
 
     /**
@@ -272,7 +426,9 @@ public class GlowManager {
      * 当玩家断开连接时清理数据
      */
     public static void onPlayerDisconnect(ServerPlayer player) {
-        playerGlowMap.remove(player.getUUID());
+        UUID playerId = player.getUUID();
+        playerGlowMap.remove(playerId);
+        playerTeamStateMap.remove(playerId);
     }
 
     /**
@@ -284,6 +440,10 @@ public class GlowManager {
 
         for (Map<Integer, GlowColor> glowMap : playerGlowMap.values()) {
             glowMap.remove(entityId);
+        }
+
+        for (Map<Integer, GlowColor> teamState : playerTeamStateMap.values()) {
+            teamState.remove(entityId);
         }
     }
 
@@ -351,20 +511,24 @@ public class GlowManager {
 
     /**
      * 初始化发光队伍（在服务器启动时调用）
+     * 清理旧版本可能创建的真实队伍，避免与虚拟队伍包冲突
      */
     public static void initializeTeams(Scoreboard scoreboard) {
+        // 清理旧版本可能创建的真实队伍
+        // 这些队伍可能导致客户端收到冲突的队伍同步包
         for (GlowColor color : GlowColor.values()) {
             String teamName = color.getTeamName();
-            PlayerTeam team = scoreboard.getPlayerTeam(teamName);
+            PlayerTeam existingTeam = scoreboard.getPlayerTeam(teamName);
 
-            if (team == null) {
-                team = scoreboard.addPlayerTeam(teamName);
+            if (existingTeam != null) {
+                // 移除队伍中的所有成员，然后删除队伍
+                // 这样可以清理旧版本遗留的数据
+                scoreboard.removePlayerTeam(existingTeam);
             }
-
-            team.setColor(color.getColor());
-            // 可选：设置队伍不可见，避免显示名称颜色等
-            team.setSeeFriendlyInvisibles(false);
         }
+
+        // 不再创建真实队伍，我们使用虚拟队伍包
+        // 虚拟队伍只通过数据包发送给特定玩家，不会被服务器同步
     }
 
     /**

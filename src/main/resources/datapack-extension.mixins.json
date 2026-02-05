@@ -6,7 +6,9 @@
 	"mixins": [
 		"ExampleMixin",
 		"GlowPacketMixin",
-		"GlowEntityTrackerMixin"
+		"GlowEntityTrackerMixin",
+		"DisplayVisibilityMixin",
+		"GlowTeamPacketMixin"
 	],
 	"injectors": {
 		"defaultRequire": 1

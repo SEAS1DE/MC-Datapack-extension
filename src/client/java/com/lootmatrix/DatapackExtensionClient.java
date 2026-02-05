@@ -20,7 +20,7 @@ public class DatapackExtensionClient implements ClientModInitializer {
 	public void onInitializeClient() {
 		// This entrypoint is suitable for setting up client-specific logic, such as rendering.
 
-        HudElementRegistry.addLast(Identifier.fromNamespaceAndPath(MOD_ID, "last_element"), hudLayer());
+        // HudElementRegistry.addLast(Identifier.fromNamespaceAndPath(MOD_ID, "last_element"), hudLayer());
         
 	}
 
